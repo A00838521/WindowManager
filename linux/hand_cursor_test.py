@@ -21,6 +21,7 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
 INDEX_TIP = 8
+_MOVE_ANNOUNCED = False
 
 
 def clamp(v, lo, hi):
@@ -28,16 +29,39 @@ def clamp(v, lo, hi):
 
 
 def try_hyprland_move_abs(x: int, y: int) -> bool:
-    """Mueve el cursor con hyprctl dispatch, si Hyprland está disponible.
-    NOTA: Hyprland no expone un movimiento absoluto nativo; como workaround, podemos usar hyprctl dispatch cursorpos x y
-    o usar herramientas de input virtual como ydotool (requiere permisos yodotoold)."""
+    """Intentar mover el cursor con hyprctl dispatch si existe un dispatcher válido.
+    En varias versiones, 'cursorpos' NO existe y hyprctl imprime 'Invalid dispatcher' con exit 0.
+    Silenciamos salida y consideramos fallo si vemos 'Invalid dispatcher'."""
     hyprctl = shutil.which("hyprctl")
     if not hyprctl:
         return False
     try:
-        # Hyprland >= 0.39 tiene 'cursorpos x y' en dispatch
-        subprocess.run([hyprctl, "dispatch", "cursorpos", str(x), str(y)], check=True)
+        proc = subprocess.run(
+            [hyprctl, "dispatch", "cursorpos", str(x), str(y)],
+            capture_output=True,
+            text=True,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        if "Invalid dispatcher" in out or proc.returncode != 0:
+            return False
         return True
+    except Exception:
+        return False
+
+
+def try_ydotool_move_abs(x: int, y: int) -> bool:
+    """Mover cursor absoluto con ydotool (requiere ydotoold activo).
+    ydotool mousemove -a -x X -y Y"""
+    ydotool = shutil.which("ydotool")
+    if not ydotool:
+        return False
+    try:
+        proc = subprocess.run(
+            [ydotool, "mousemove", "-a", "-x", str(x), "-y", str(y)],
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode == 0
     except Exception:
         return False
 
@@ -53,22 +77,61 @@ def try_pyautogui_move(x: int, y: int) -> bool:
 
 
 def get_screen_size() -> Tuple[int, int]:
-    # Intentar con XDG-PORTAL envs, fallback pyautogui
+    """Detecta tamaño de pantalla:
+    1) hyprctl -j monitors
+    2) pyautogui.size()
+    3) fallback 1920x1080
+    """
+    hyprctl = shutil.which("hyprctl")
+    if hyprctl:
+        try:
+            proc = subprocess.run([hyprctl, "-j", "monitors"], capture_output=True, text=True)
+            if proc.returncode == 0 and proc.stdout:
+                mons = json.loads(proc.stdout)
+                # Elegir monitor activo con focus o el primero
+                mon = None
+                for m in mons:
+                    if m.get("focused"):
+                        mon = m
+                        break
+                if mon is None and mons:
+                    mon = mons[0]
+                if mon:
+                    # Hyprland expone size: { x, y }
+                    if "width" in mon and "height" in mon:
+                        return int(mon["width"]), int(mon["height"])
+                    if isinstance(mon.get("size"), dict):
+                        return int(mon["size"].get("x", 1920)), int(mon["size"].get("y", 1080))
+        except Exception:
+            pass
+
     try:
         import pyautogui
         w, h = pyautogui.size()
         return int(w), int(h)
     except Exception:
-        # Fallback a 1920x1080 si no se puede consultar
         return 1920, 1080
 
 
 def move_cursor_abs(x: int, y: int) -> bool:
-    # Intentar primero Hyprland
+    global _MOVE_ANNOUNCED
+    # Preferir ydotool en Wayland/Hyprland
+    if try_ydotool_move_abs(x, y):
+        if not _MOVE_ANNOUNCED:
+            print("[input] Usando ydotool para mover el cursor (Wayland)")
+            _MOVE_ANNOUNCED = True
+        return True
+    # Intentar Hyprland dispatch (si existe)
     if try_hyprland_move_abs(x, y):
+        if not _MOVE_ANNOUNCED:
+            print("[input] Usando hyprctl dispatch para mover el cursor")
+            _MOVE_ANNOUNCED = True
         return True
     # Luego pyautogui (X11/Wayland portal)
     if try_pyautogui_move(x, y):
+        if not _MOVE_ANNOUNCED:
+            print("[input] Usando pyautogui para mover el cursor")
+            _MOVE_ANNOUNCED = True
         return True
     return False
 
