@@ -2,4 +2,5 @@ mediapipe>=0.10.14
 opencv-python>=4.8.0
 matplotlib>=3.7.0
 pywinctl>=0.4.1
-pyobjc>=10.3.1
+pyobjc>=10.3.1; sys_platform == "darwin"
+evdev; sys_platform == "linux"
